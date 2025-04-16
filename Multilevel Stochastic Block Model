@@ -5,67 +5,85 @@ import pytensor.tensor as pt
 from scipy.special import expit as logistic
 import pymc as pm
 
-def custom_sigmoid(x):
-    return pm.math.exp(x) / (1 + pm.math.exp(x))
-
-def create_model(data_matrix, num_nodes, num_blocks, num_supblocks, mu_zeta, sigma_zeta, a_tau, b_tau, a_sigma, b_sigma, a_beta, b_beta, a_alpha, b_alpha):
+def create_model_hierarchical_improved(data_matrix, num_nodes, num_blocks, num_supblocks, 
+                                      a_alpha=1, b_alpha=1, a_beta=1, b_beta=1,
+                                      mu_zeta=0, sigma_zeta=2, a_tau=2, b_tau=1, 
+                                      a_sigma=2, b_sigma=1):
     
-    #---------------------------- Data  -----------------------------#
+    # Considering only the upper triangular part
     data_matrix = data_matrix.reshape(num_nodes * num_nodes).T
     mask = np.triu(np.ones((num_nodes, num_nodes)), k=1).astype(bool)
     data_vector = data_matrix.reshape(num_nodes, num_nodes)[mask]
-
-    #---------------------------- Prior Parameters  ---------------------------#
-    with pm.Model() as MULTISBMmodel:
-         # Priors
+    
+    with pm.Model() as HierarchicalSBMmodel:
+        # Priors
         alpha = pm.Gamma("alpha", alpha=a_alpha, beta=b_alpha)
         omega = pm.Dirichlet("omega", a=np.ones(num_blocks) * (alpha / num_blocks), shape=num_blocks)
-
         beta = pm.Gamma("beta", alpha=a_beta, beta=b_beta)
         upsilon = pm.Dirichlet("upsilon", a=np.ones(num_supblocks) * (beta / num_supblocks), shape=num_supblocks)
+        log_tau = pm.Normal("log_tau", mu=0, sigma=1)
+        tau = pm.Deterministic("tau", pm.math.exp(log_tau))
+        log_sigma = pm.Normal("log_sigma", mu=0, sigma=1)
+        sigma = pm.Deterministic("sigma", pm.math.exp(log_sigma))
+        zeta_raw = pm.Normal("zeta_raw", mu=mu_zeta, sigma=sigma_zeta)
+        zeta = pm.Deterministic("zeta", pm.math.sigmoid(zeta_raw))
         
-        sigma2 = pm.InverseGamma("sigma2", alpha=a_sigma, beta=b_sigma)
-        tau2 = pm.InverseGamma("tau2", alpha=a_tau, beta=b_tau)
-        zeta_raw = pm.Normal("zetafull", mu=mu_zeta, sigma=sigma_zeta)
-        zeta = pm.Deterministic("zeta", custom_sigmoid(zeta_raw))
-      
-        mu_qr_raw = pm.Normal("mu_qr", mu=zeta, sigma=np.sqrt(tau2), shape=(num_supblocks * (num_supblocks + 1)) // 2)
-        
+        mu_qr_logit = pm.Normal("mu_qr_logit", mu=zeta_raw, sigma=tau, 
+                               shape=(num_supblocks * (num_supblocks + 1)) // 2)
+        mu_qr = pm.Deterministic("mu_qr", pm.math.sigmoid(mu_qr_logit))
+        mu_qr_clipped = pm.math.clip(mu_qr, 0.001, 0.999)
         mu_qr_matrix = pt.zeros((num_supblocks, num_supblocks), dtype="float64")
         triu_indices_mu = pt.triu_indices(num_supblocks)
-        mu_qr_matrix = pt.set_subtensor(mu_qr_matrix[triu_indices_mu], mu_qr_raw)
+        mu_qr_matrix = pt.set_subtensor(mu_qr_matrix[triu_indices_mu], mu_qr_clipped)  
         mu_qr_matrix = mu_qr_matrix + mu_qr_matrix.T - pt.diag(pt.diagonal(mu_qr_matrix))
-
+                
         gamma_row = pm.Categorical("gamma_row", p=upsilon, shape=num_blocks)
         gamma_row = pt.clip(gamma_row, 0, num_supblocks - 1)
-        
         gamma_matrix = pt.zeros((num_supblocks, num_blocks), dtype="int32")
         gamma_matrix = pt.set_subtensor(gamma_matrix[gamma_row, pt.arange(num_blocks)], 1)
         gamma_matrix_deterministic = pt.as_tensor_variable(gamma_matrix)
-          
+        
         def calculate_mugamma(gamma_matrix_deterministic, mu_qr_matrix):
             return pt.dot(pt.dot(gamma_matrix_deterministic.T, mu_qr_matrix), gamma_matrix_deterministic)
+        mu_qr_matrix_clipped = pm.math.clip(mu_qr_matrix, 0.001, 0.999)
 
         mugamma = pm.Deterministic("mugamma", calculate_mugamma(gamma_matrix_deterministic, mu_qr_matrix))
-
-        Theta_kl_raw = pm.Normal("Theta_kl", mu=mugamma, sigma=pt.sqrt(sigma2), shape=(num_blocks, num_blocks))
-        Theta_matrix = pt.triu(Theta_kl_raw)  # Tomar la triangular superior
-        Theta_matrix = Theta_matrix + Theta_matrix.T - pt.diag(pt.diagonal(Theta_kl_raw))  # Hacerla simétrica
-
+        
+        triu_indices = pt.triu_indices(num_blocks)
+        mugamma_triu = mugamma[triu_indices]
+        mugamma_triu_clipped = pm.math.clip(mugamma_triu, 0.001, 0.999)
+        
+        # Theta 
+        Theta_kl_logit = pm.Normal("Theta_kl_logit", 
+                         mu=pm.math.logit(mugamma_triu_clipped), 
+                         sigma=sigma,
+                         shape=(num_blocks * (num_blocks + 1)) // 2)
+        Theta_kl = pm.Deterministic("Theta_kl", pm.math.sigmoid(Theta_kl_logit))
+        
+        Theta_matrix = pt.zeros((num_blocks, num_blocks), dtype="float64")
+        triu_indices = pt.triu_indices(num_blocks)
+        Theta_matrix = pt.set_subtensor(Theta_matrix[triu_indices], Theta_kl)
+        Theta_matrix = Theta_matrix + Theta_matrix.T - pt.diag(pt.diagonal(Theta_matrix))
+        
+        # Assignment of nodes to blocks
         E_row = pm.Categorical("E_vector", p=omega, shape=num_nodes)
         E_row = pt.clip(E_row, 0, num_blocks - 1)
         E_matrix = pt.zeros((num_blocks, num_nodes), dtype="int32")
         E_matrix = pt.set_subtensor(E_matrix[E_row, pt.arange(num_nodes)], 1)
         E_matrix_deterministic = pt.as_tensor_variable(E_matrix)
-       
+    
+        # Probability calculation
         def calculate_lambda(E_matrix_deterministic, Theta_matrix, mask):
             full_matrix = pt.dot(pt.dot(E_matrix_deterministic.T, Theta_matrix), E_matrix_deterministic)
             indices = pt.nonzero(mask)
             edge_probs = full_matrix[indices]
+            edge_probs = pt.clip(edge_probs, 0.001, 0.999)  # Clip para estabilidad numérica
             return edge_probs
         
         Lambda = pm.Deterministic("Lambda", calculate_lambda(E_matrix_deterministic, Theta_matrix, mask))
         Lambda = Lambda.flatten()
+        
+        # Likelihood
         pm.Bernoulli("Y_obs", p=Lambda, observed=data_vector)
-
-    return MULTISBMmodel
+    
+    return HierarchicalSBMmodel
