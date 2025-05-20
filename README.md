@@ -1,11 +1,3 @@
-Files numbered from 1 to 3.1 contain the implementation of the model for each dataset:
+Numbering from 1 to 3.1 refers to the files containing the implementation of the model for each dataset. File 1 is the implementation of the Stochastic Block Model (SBM) for the simulated dataset, while file 1.1 is the implementation of the hierarchical model for the same simulated dataset. File 2 contains the SBM implementation for the Karate dataset, and file 2.1 contains the hierarchical model implementation for that dataset. File 3 includes the SBM implementation for the Macaque dataset, and file 3.1 contains the hierarchical model implementation for the Macaque dataset.
 
-SBM implementation for the simulated dataset
-1.1 Hierarchical model implementation for the simulated dataset
-SBM implementation for the Karate dataset
-2.1 Hierarchical model implementation for the Karate dataset
-SBM implementation for the Macaque dataset
-3.1 Hierarchical model implementation for the Macaque dataset
-The Multilevel Stochastic Block Model folder contains the main implementation and construction of the hierarchical model, while the Stochastic Block Model folder contains the main implementation and construction of the SBM.
-
-There are also three datasets included, which are required to run the code.
+The Multilevel Stochastic Block Model directory includes the main implementation and construction of the hierarchical model, while the Stochastic Block Model directory includes the main implementation and construction of the SBM. Additionally, the three datasets used to run the code are also included.
